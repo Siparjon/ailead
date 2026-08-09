@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import streamlit as st
 
@@ -33,7 +35,6 @@ if run:
             if not places:
                 status.update(label="No businesses found", state="error")
                 st.stop()
-
             st.write("2/3 — Enriching public websites, emails, phones and social/profile links...")
             st.write("3/3 — Scoring leads with the local AI model...")
             leads = qualify_leads(places, service, ideal_customer, model, enrich=enrich)
@@ -48,7 +49,6 @@ if run:
             st.stop()
 
     st.subheader("Qualified leads")
-
     for i, lead in enumerate(leads, start=1):
         score = lead["score"]
         label = "🔥" if score >= 80 else "🟡" if score >= 60 else "⚪"
@@ -67,11 +67,7 @@ if run:
             with c2:
                 st.write(f"**Fit:** {lead['fit']}")
                 st.write("**Public profiles:**")
-                profiles = [
-                    ("LinkedIn", lead.get("linkedin")), ("Instagram", lead.get("instagram")),
-                    ("Facebook", lead.get("facebook")), ("TikTok", lead.get("tiktok")),
-                    ("YouTube", lead.get("youtube")), ("X", lead.get("x")), ("WhatsApp", lead.get("whatsapp")),
-                ]
+                profiles = [("LinkedIn", lead.get("linkedin")), ("Instagram", lead.get("instagram")), ("Facebook", lead.get("facebook")), ("TikTok", lead.get("tiktok")), ("YouTube", lead.get("youtube")), ("X", lead.get("x")), ("WhatsApp", lead.get("whatsapp"))]
                 found_profiles = False
                 for label_name, url in profiles:
                     if url:
@@ -83,7 +79,6 @@ if run:
                 for reason in lead["reasons"]:
                     st.write(f"- {reason}")
                 st.write(f"**Suggested service:** {lead['suggested_service']}")
-
             st.write("**Draft outreach:**")
             st.code(lead["outreach"], language=None)
             if lead.get("contact_page"):
@@ -103,12 +98,7 @@ if run:
             export[col] = export[col].apply(lambda x: " | ".join(x) if isinstance(x, list) else x)
     if "socials" in export:
         export["socials"] = export["socials"].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, dict) else x)
-    st.download_button(
-        "Download enriched leads as CSV",
-        export.to_csv(index=False).encode("utf-8"),
-        file_name="ai_enriched_leads.csv",
-        mime="text/csv",
-    )
+    st.download_button("Download enriched leads as CSV", export.to_csv(index=False).encode("utf-8"), file_name="ai_enriched_leads.csv", mime="text/csv")
 else:
     st.info("Set your search criteria on the left and click **Find leads**.")
     st.markdown("**Example:** `Kuala Lumpur` → `restaurants` → `bookkeeping` → 10 leads")
