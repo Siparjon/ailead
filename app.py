@@ -19,7 +19,7 @@ with st.sidebar:
     enrich = st.checkbox("Deep public-web enrichment", True)
     require_contact = st.checkbox("Remove leads with no public contact/profile", True)
     require_website = st.checkbox("Remove leads with no public website", False)
-    crawl_pages = st.slider("Pages to scan per website", 3, 30, 15, help="Scans only public pages on the same domain. More pages = slower search.")
+    crawl_pages = st.slider("Pages to scan per website", 1, 10, 5, help="Lower values are much faster. Start with 3–5 pages; increase only when you need deeper decision-maker research.")
     run = st.button("Find leads", type="primary", use_container_width=True)
 
 if run:
@@ -27,14 +27,14 @@ if run:
     with st.status("Finding and qualifying businesses...",expanded=True) as status:
         try:
             st.write(f"1/4 — Finding candidate businesses: `{query}`")
+            # Search extra candidates so filters can still leave the requested number of usable leads.
             places=search_places(location,business_type,count*3 if enrich else count)
             st.write(f"Found {len(places)} initial candidates.")
             if not places: status.update(label="No businesses found",state="error"); st.stop()
             st.write("2/4 — Searching public web results and business websites...")
-            st.write(f"3/4 — Crawling up to {crawl_pages} public pages per candidate and looking for contact/decision-maker evidence...")
+            st.write(f"3/4 — Fast crawl: up to {crawl_pages} public pages per candidate. Increase this only if you need deeper research.")
             leads=qualify_leads(places,service,ideal_customer,model,enrich=enrich,location=location,require_contact=require_contact,require_website=require_website,crawl_pages=crawl_pages)
             st.write(f"4/4 — AI qualification complete. {len(leads)} usable leads remain after filters.")
-            local=sum(1 for x in leads if x.get("ai_mode")=="Local AI")
             if len(leads)>count: leads=leads[:count]
             status.update(label=f"Done — {len(leads)} leads",state="complete")
         except Exception as exc:
@@ -80,5 +80,5 @@ if run:
     st.download_button("Download enriched leads as CSV",export.to_csv(index=False).encode("utf-8"),file_name="ai_enriched_leads.csv",mime="text/csv")
 else:
     st.info("Set your search criteria and click **Find leads**.")
-    st.markdown("**Recommended test:** Kuala Lumpur → restaurants → bookkeeping → 10 leads → Deep enrichment ON → Remove no-contact ON.")
+    st.markdown("**Fast test:** Kuala Lumpur → restaurants → bookkeeping → 10 leads → Deep enrichment ON → 3–5 pages → Remove no-contact ON.")
     st.warning("Only public information is collected. The app does not log into LinkedIn/social networks, bypass privacy controls, or try to obtain private contact data. Verify contacts and comply with applicable outreach/privacy rules before messaging.")
