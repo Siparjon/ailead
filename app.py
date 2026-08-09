@@ -5,8 +5,8 @@ from lead_finder import qualify_leads, search_places
 
 st.set_page_config(page_title="AI Lead Finder — Free", page_icon="🎯", layout="wide")
 
-st.title("🎯 AI Lead Finder — Free MVP")
-st.caption("Find public business leads with OpenStreetMap and qualify them with a local AI model. No paid API keys required.")
+st.title("🎯 AI Lead Finder — Free")
+st.caption("Find businesses from OpenStreetMap + public web search, enrich public contacts/socials, and qualify leads with local AI. No paid API keys required.")
 
 with st.sidebar:
     st.header("Search")
@@ -18,14 +18,15 @@ with st.sidebar:
         "Small owner-managed businesses that may benefit from recurring bookkeeping, Excel cleanup, reconciliation, or simple monthly reports.",
         height=110,
     )
-    count = st.slider("Businesses to analyze", 5, 20, 10)
+    count = st.slider("Businesses to analyze", 5, 30, 10)
     model = st.text_input("Local Ollama model", "qwen3:4b")
+    enrich = st.checkbox("Enrich with public web/contact/social data", True)
     run = st.button("Find leads", type="primary", use_container_width=True)
 
 if run:
     query = f"{business_type} in {location}"
     with st.status("Finding and qualifying businesses...", expanded=True) as status:
-        st.write(f"Searching public OpenStreetMap data for: `{query}`")
+        st.write(f"1/3 — Searching public OpenStreetMap data for: `{query}`")
         try:
             places = search_places(location, business_type, count)
             st.write(f"Found {len(places)} businesses.")
@@ -33,8 +34,9 @@ if run:
                 status.update(label="No businesses found", state="error")
                 st.stop()
 
-            st.write(f"Trying local AI model: `{model}`")
-            leads = qualify_leads(places, service, ideal_customer, model)
+            st.write("2/3 — Enriching public websites, emails, phones and social/profile links...")
+            st.write("3/3 — Scoring leads with the local AI model...")
+            leads = qualify_leads(places, service, ideal_customer, model, enrich=enrich)
             local_ai_count = sum(1 for x in leads if x.get("ai_mode") == "Local AI")
             fallback_count = len(leads) - local_ai_count
             if fallback_count:
@@ -57,9 +59,26 @@ if run:
                 st.write(f"**Address:** {lead['address'] or 'Unknown'}")
                 st.write(f"**Type:** {lead['type'] or 'Unknown'}")
                 st.write(f"**Website:** {lead['website'] or 'Unknown'}")
-                st.write(f"**Phone:** {lead['phone'] or 'Unknown'}")
+                st.write(f"**Business phone:** {lead['phone'] or 'Unknown'}")
+                emails = lead.get("public_emails", [])
+                phones = lead.get("public_phones", [])
+                st.write(f"**Public emails:** {', '.join(emails) if emails else 'Not found'}")
+                st.write(f"**Public phones:** {', '.join(phones) if phones else 'Not found'}")
             with c2:
                 st.write(f"**Fit:** {lead['fit']}")
+                st.write("**Public profiles:**")
+                profiles = [
+                    ("LinkedIn", lead.get("linkedin")), ("Instagram", lead.get("instagram")),
+                    ("Facebook", lead.get("facebook")), ("TikTok", lead.get("tiktok")),
+                    ("YouTube", lead.get("youtube")), ("X", lead.get("x")), ("WhatsApp", lead.get("whatsapp")),
+                ]
+                found_profiles = False
+                for label_name, url in profiles:
+                    if url:
+                        found_profiles = True
+                        st.markdown(f"- [{label_name}]({url})")
+                if not found_profiles:
+                    st.caption("No public social/profile link found")
                 st.write("**Why it may fit:**")
                 for reason in lead["reasons"]:
                     st.write(f"- {reason}")
@@ -67,21 +86,30 @@ if run:
 
             st.write("**Draft outreach:**")
             st.code(lead["outreach"], language=None)
-            if lead["google_maps"]:
+            if lead.get("contact_page"):
+                st.markdown(f"[Open contact page]({lead['contact_page']})")
+            if lead.get("google_maps"):
                 st.markdown(f"[Open in Google Maps]({lead['google_maps']})")
+            if lead.get("search_sources"):
+                with st.expander("Public web sources used"):
+                    for source in lead["search_sources"]:
+                        st.write(source)
             if lead["unknowns"]:
                 st.caption("Verify before contacting: " + "; ".join(lead["unknowns"]))
 
     export = pd.DataFrame(leads)
-    export["reasons"] = export["reasons"].apply(lambda x: " | ".join(x))
-    export["unknowns"] = export["unknowns"].apply(lambda x: " | ".join(x))
+    for col in ["reasons", "unknowns", "public_emails", "public_phones"]:
+        if col in export:
+            export[col] = export[col].apply(lambda x: " | ".join(x) if isinstance(x, list) else x)
+    if "socials" in export:
+        export["socials"] = export["socials"].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, dict) else x)
     st.download_button(
-        "Download leads as CSV",
+        "Download enriched leads as CSV",
         export.to_csv(index=False).encode("utf-8"),
-        file_name="ai_leads.csv",
+        file_name="ai_enriched_leads.csv",
         mime="text/csv",
     )
 else:
     st.info("Set your search criteria on the left and click **Find leads**.")
-    st.markdown("**First test:** `Kuala Lumpur` → `restaurants` → `bookkeeping` → 10 leads.")
-    st.markdown("**Free stack:** OpenStreetMap/Overpass for public place data + Ollama for local AI. Ollama can run models locally on Windows without a paid API key.")
+    st.markdown("**Example:** `Kuala Lumpur` → `restaurants` → `bookkeeping` → 10 leads")
+    st.markdown("**Free stack:** OpenStreetMap/Overpass + public web search + public websites + Ollama local AI. The app does not log into or bypass LinkedIn, Instagram, Facebook, or other sites.")
