@@ -1,42 +1,48 @@
-# AI Lead Finder
+# AI Lead Finder — Free MVP
 
-A small MVP that finds local businesses and uses an OpenAI model to score them as potential bookkeeping/accounting leads.
+A small local-first lead finder for discovering public business listings and qualifying them as potential bookkeeping/accounting leads.
 
 ## What it does
 
-1. Search businesses with Google Places API (New).
-2. Deduplicate results.
-3. Ask an OpenAI model to score each business from 0–100 for the service you want to sell.
-4. Generate a short reason and a personalized first outreach message.
-5. Show results in a sortable table and let you download CSV.
+1. Geocodes a city/area with OpenStreetMap Nominatim.
+2. Finds public business listings with OpenStreetMap + Overpass — no paid API key required.
+3. Scores each business with a local Ollama model when available.
+4. Falls back to a simple deterministic score if Ollama is not running.
+5. Generates a short reason and personalized first outreach message.
+6. Lets you download the results as CSV.
 
-## Setup
+## Setup on Windows
 
 Requirements: Python 3.11+
 
-```bash
+```powershell
 pip install -r requirements.txt
-cp .env.example .env
-```
-
-Add API keys to `.env`:
-
-```env
-OPENAI_API_KEY=your_openai_key
-GOOGLE_MAPS_API_KEY=your_google_maps_key
-OPENAI_MODEL=gpt-5-mini
-```
-
-Then run:
-
-```bash
 streamlit run app.py
 ```
 
-## Google Places setup
+### Optional: local AI
 
-Enable **Places API (New)** in your Google Cloud project and create an API key. The app uses Text Search (New) with an explicit field mask.
+Install Ollama for Windows from https://ollama.com/download/windows, then in PowerShell:
+
+```powershell
+ollama pull qwen3:4b
+```
+
+Keep Ollama running and use `qwen3:4b` in the Streamlit sidebar. The model runs locally, so this MVP does not need an OpenAI API key.
+
+If your computer is not powerful enough for the model, the app still works using the free rule-based fallback.
+
+## First test
+
+Use:
+
+- Location: `Kuala Lumpur, Malaysia`
+- Business type: `restaurants`
+- Service: `bookkeeping and basic financial reporting`
+- Businesses: `10`
+
+Then click **Find leads**.
 
 ## Important
 
-The MVP only uses public business information returned by the Places API. It does not automatically send messages or scrape private/personal data. Review leads and outreach manually before contacting anyone.
+The MVP uses public place/business information from OpenStreetMap. It does not automatically send messages or collect private/personal data. Verify business details and review outreach manually before contacting anyone.
