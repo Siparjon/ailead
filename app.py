@@ -1,23 +1,17 @@
-import os
-
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
-from openai import OpenAI
 
 from lead_finder import qualify_leads, search_places
 
-load_dotenv()
+st.set_page_config(page_title="AI Lead Finder — Free", page_icon="🎯", layout="wide")
 
-st.set_page_config(page_title="AI Lead Finder", page_icon="🎯", layout="wide")
-
-st.title("🎯 AI Lead Finder")
-st.caption("Find public business leads, qualify them with AI, and prepare outreach.")
+st.title("🎯 AI Lead Finder — Free MVP")
+st.caption("Find public business leads with OpenStreetMap and qualify them with a local AI model. No paid API keys required.")
 
 with st.sidebar:
     st.header("Search")
     location = st.text_input("Location", "Kuala Lumpur, Malaysia")
-    business_type = st.text_input("Business type", "small businesses")
+    business_type = st.text_input("Business type", "restaurants")
     service = st.text_input("Service you sell", "bookkeeping and basic financial reporting")
     ideal_customer = st.text_area(
         "Ideal customer",
@@ -25,30 +19,26 @@ with st.sidebar:
         height=110,
     )
     count = st.slider("Businesses to analyze", 5, 20, 10)
+    model = st.text_input("Local Ollama model", "qwen3:4b")
     run = st.button("Find leads", type="primary", use_container_width=True)
 
 if run:
-    openai_key = os.getenv("OPENAI_API_KEY")
-    google_key = os.getenv("GOOGLE_MAPS_API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-
-    if not openai_key or not google_key:
-        st.error("Add OPENAI_API_KEY and GOOGLE_MAPS_API_KEY to your .env file first.")
-        st.stop()
-
     query = f"{business_type} in {location}"
     with st.status("Finding and qualifying businesses...", expanded=True) as status:
-        st.write(f"Searching: `{query}`")
+        st.write(f"Searching public OpenStreetMap data for: `{query}`")
         try:
-            places = search_places(query, google_key, count)
+            places = search_places(location, business_type, count)
             st.write(f"Found {len(places)} businesses.")
             if not places:
                 status.update(label="No businesses found", state="error")
                 st.stop()
 
-            st.write("AI is scoring each business...")
-            client = OpenAI(api_key=openai_key)
-            leads = qualify_leads(places, service, ideal_customer, client, model)
+            st.write(f"Trying local AI model: `{model}`")
+            leads = qualify_leads(places, service, ideal_customer, model)
+            local_ai_count = sum(1 for x in leads if x.get("ai_mode") == "Local AI")
+            fallback_count = len(leads) - local_ai_count
+            if fallback_count:
+                st.write(f"Local AI unavailable for {fallback_count} lead(s); used free rule-based fallback.")
             status.update(label=f"Done — {len(leads)} leads qualified", state="complete")
         except Exception as exc:
             status.update(label="Search failed", state="error")
@@ -61,11 +51,11 @@ if run:
         score = lead["score"]
         label = "🔥" if score >= 80 else "🟡" if score >= 60 else "⚪"
         with st.expander(f"{i}. {lead['business_name']} — {score}/100 {label}"):
+            st.caption(f"Scoring: {lead.get('ai_mode', 'Unknown')}")
             c1, c2 = st.columns([1, 1])
             with c1:
                 st.write(f"**Address:** {lead['address'] or 'Unknown'}")
                 st.write(f"**Type:** {lead['type'] or 'Unknown'}")
-                st.write(f"**Rating:** {lead['rating'] or 'Unknown'} ({lead['review_count'] or 0} reviews)")
                 st.write(f"**Website:** {lead['website'] or 'Unknown'}")
                 st.write(f"**Phone:** {lead['phone'] or 'Unknown'}")
             with c2:
@@ -93,6 +83,5 @@ if run:
     )
 else:
     st.info("Set your search criteria on the left and click **Find leads**.")
-    st.markdown(
-        "**First test:** `Kuala Lumpur` → `small restaurants` → `bookkeeping` → 10 leads."
-    )
+    st.markdown("**First test:** `Kuala Lumpur` → `restaurants` → `bookkeeping` → 10 leads.")
+    st.markdown("**Free stack:** OpenStreetMap/Overpass for public place data + Ollama for local AI. Ollama can run models locally on Windows without a paid API key.")
