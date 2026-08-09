@@ -1,9 +1,12 @@
 import json
 import re
+import socket
+from collections import deque
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
+from bs4 import BeautifulSoup
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URLS = [
@@ -13,267 +16,173 @@ OVERPASS_URLS = [
 ]
 OLLAMA_URL = "http://localhost:11434/api/generate"
 DDG_URL = "https://html.duckduckgo.com/html/"
-HTTP_HEADERS = {
-    "User-Agent": "ailead-free-mvp/1.1 (personal lead research tool)",
-    "Accept": "text/html,application/xhtml+xml,application/json",
-}
-
+HTTP_HEADERS = {"User-Agent": "ailead-free-mvp/1.2 (personal lead research tool)", "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8"}
 CATEGORY_TAGS = {
     "restaurant": [("amenity", "restaurant")], "restaurants": [("amenity", "restaurant")],
     "cafe": [("amenity", "cafe")], "cafes": [("amenity", "cafe")], "coffee shop": [("amenity", "cafe")],
     "bar": [("amenity", "bar")], "gym": [("leisure", "fitness_centre")], "fitness": [("leisure", "fitness_centre")],
-    "hair salon": [("shop", "hairdresser")], "barbershop": [("shop", "hairdresser")],
-    "beauty salon": [("shop", "beauty")], "bakery": [("shop", "bakery")],
-    "clothing store": [("shop", "clothes")], "clothing": [("shop", "clothes")],
-    "supermarket": [("shop", "supermarket")], "hotel": [("tourism", "hotel")],
-    "real estate": [("office", "estate_agent")], "accounting": [("office", "accountant")],
-    "law firm": [("office", "lawyer")],
-}
-
-SOCIAL_DOMAINS = {
-    "instagram.com": "instagram", "facebook.com": "facebook", "linkedin.com": "linkedin",
-    "tiktok.com": "tiktok", "youtube.com": "youtube", "x.com": "x", "twitter.com": "twitter",
-    "wa.me": "whatsapp",
+    "hair salon": [("shop", "hairdresser")], "barbershop": [("shop", "hairdresser")], "beauty salon": [("shop", "beauty")],
+    "bakery": [("shop", "bakery")], "clothing store": [("shop", "clothes")], "clothing": [("shop", "clothes")],
+    "supermarket": [("shop", "supermarket")], "hotel": [("tourism", "hotel")], "real estate": [("office", "estate_agent")],
+    "accounting": [("office", "accountant")], "law firm": [("office", "lawyer")],
 }
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
-
-
-def geocode_location(location: str) -> tuple[float, float, float, float]:
-    response = requests.get(NOMINATIM_URL, params={"q": location, "format": "json", "limit": 1}, headers=HTTP_HEADERS, timeout=20)
-    response.raise_for_status()
-    results = response.json()
-    if not results:
-        raise ValueError(f"Could not find location: {location}")
-    item = results[0]
-    lat, lon = float(item["lat"]), float(item["lon"])
-    bbox = item.get("boundingbox")
-    if bbox:
-        south, north, west, east = map(float, bbox)
-        if abs(north - south) > 0.8 or abs(east - west) > 0.8:
-            south, north, west, east = lat - 0.12, lat + 0.12, lon - 0.12, lon + 0.12
-    else:
-        south, north, west, east = lat - 0.12, lat + 0.12, lon - 0.12, lon + 0.12
-    return south, west, north, east
-
-
-def _overpass_query(query: str) -> dict[str, Any]:
-    last_error = None
-    for url in OVERPASS_URLS:
-        try:
-            response = requests.post(url, data={"data": query}, headers={**HTTP_HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, timeout=60)
-            if response.ok:
-                return response.json()
-            last_error = f"{response.status_code} from {url}: {response.text[:200]}"
-        except requests.RequestException as exc:
-            last_error = str(exc)
-    raise RuntimeError(f"All OpenStreetMap Overpass servers failed. Last error: {last_error}")
-
-
-def search_places(location: str, business_type: str, max_results: int = 20) -> list[dict[str, Any]]:
-    south, west, north, east = geocode_location(location)
-    key = business_type.strip().lower()
-    tags = CATEGORY_TAGS.get(key)
-    if tags:
-        clauses = "\n".join(f'  nwr["{tag}"="{value}"]({south},{west},{north},{east});' for tag, value in tags)
-    elif "restaurant" in key:
-        clauses = f'  nwr["amenity"="restaurant"]({south},{west},{north},{east});'
-    elif "shop" in key or "store" in key:
-        clauses = f'  nwr["shop"]({south},{west},{north},{east});'
-    else:
-        safe = re.sub(r"[^A-Za-z0-9 .&_-]", "", business_type).strip()
-        clauses = f'  nwr["name"~"{safe}",i]({south},{west},{north},{east});' if safe else f'  nwr["name"]({south},{west},{north},{east});'
-    query = f"""
-[out:json][timeout:25];
-(
-{clauses}
-);
-out center tags;
-"""
-    elements = _overpass_query(query).get("elements", [])
-    places, seen = [], set()
-    for element in elements:
-        tags_data = element.get("tags", {})
-        name = tags_data.get("name")
-        if not name:
-            continue
-        key_id = str(element.get("id"))
-        if key_id in seen:
-            continue
-        seen.add(key_id)
-        center = element.get("center", {})
-        lat = element.get("lat", center.get("lat"))
-        lon = element.get("lon", center.get("lon"))
-        maps = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else ""
-        places.append({
-            "id": key_id, "business_name": name,
-            "address": ", ".join(filter(None, [tags_data.get("addr:housenumber"), tags_data.get("addr:street"), tags_data.get("addr:city")])),
-            "type": tags_data.get("amenity") or tags_data.get("shop") or tags_data.get("office") or tags_data.get("tourism") or tags_data.get("leisure") or business_type,
-            "website": tags_data.get("website") or tags_data.get("contact:website") or "",
-            "phone": tags_data.get("phone") or tags_data.get("contact:phone") or "",
-            "rating": None, "review_count": None, "google_maps": maps, "status": "",
-        })
-        if len(places) >= max_results * 3:
-            break
-    return places[:max_results]
+SOCIAL_DOMAINS = {"linkedin.com":"linkedin", "instagram.com":"instagram", "facebook.com":"facebook", "tiktok.com":"tiktok", "youtube.com":"youtube", "x.com":"x", "twitter.com":"x", "wa.me":"whatsapp"}
+ROLE_WORDS = ("owner", "founder", "co-founder", "ceo", "director", "managing director", "manager", "principal")
+CONTACT_WORDS = ("contact", "about", "team", "leadership", "management", "founder", "owner")
 
 
 def _domain(url: str) -> str:
+    try: return urlparse(url).netloc.lower().removeprefix("www.")
+    except Exception: return ""
+
+
+def _safe_public_url(url: str) -> bool:
     try:
-        return urlparse(url).netloc.lower().removeprefix("www.")
-    except Exception:
-        return ""
+        p = urlparse(url)
+        if p.scheme not in {"http", "https"} or not p.hostname: return False
+        host = p.hostname.lower()
+        if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"): return False
+        for info in socket.getaddrinfo(host, None):
+            ip = info[4][0]
+            if ip.startswith(("10.", "192.168.", "127.")) or (ip.startswith("172.") and 16 <= int(ip.split(".")[1]) <= 31): return False
+        return True
+    except Exception: return False
 
 
-def _search_web(query: str, limit: int = 8) -> list[dict[str, str]]:
-    """Public web search; no paid search API and no login/bypass."""
-    try:
-        r = requests.get(DDG_URL, params={"q": query}, headers=HTTP_HEADERS, timeout=20)
-        r.raise_for_status()
-        results = []
-        for match in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', r.text, re.I | re.S):
-            url = match.group(1)
-            title = re.sub(r"<.*?>", "", match.group(2)).strip()
-            if url.startswith("//duckduckgo.com/l/"):
-                m = re.search(r"uddg=([^&]+)", url)
-                if m:
-                    from urllib.parse import unquote
-                    url = unquote(m.group(1))
-            if url.startswith("http"):
-                results.append({"title": title, "url": url.split("#")[0]})
-            if len(results) >= limit:
-                break
-        return results
-    except requests.RequestException:
-        return []
+def geocode_location(location: str) -> tuple[float,float,float,float]:
+    r = requests.get(NOMINATIM_URL, params={"q":location,"format":"json","limit":1}, headers=HTTP_HEADERS, timeout=20); r.raise_for_status()
+    data = r.json()
+    if not data: raise ValueError(f"Could not find location: {location}")
+    x=data[0]; lat,lon=float(x["lat"]),float(x["lon"]); bbox=x.get("boundingbox")
+    if bbox:
+        south,north,west,east=map(float,bbox)
+        if abs(north-south)>0.8 or abs(east-west)>0.8: south,north,west,east=lat-.12,lat+.12,lon-.12,lon+.12
+    else: south,north,west,east=lat-.12,lat+.12,lon-.12,lon+.12
+    return south,west,north,east
 
 
-def _extract_contacts_from_html(html: str, base_url: str) -> dict[str, Any]:
-    emails = sorted(set(EMAIL_RE.findall(html)))
-    phones = sorted(set(PHONE_RE.findall(html)))
-    socials = {}
-    for href in re.findall(r'href=["\']([^"\']+)["\']', html, re.I):
-        absolute = urljoin(base_url, href)
-        domain = _domain(absolute)
-        for social_domain, label in SOCIAL_DOMAINS.items():
-            if domain == social_domain or domain.endswith("." + social_domain):
-                socials.setdefault(label, absolute)
-    text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.I | re.S)
-    text = re.sub(r"<.*?>", " ", text)
-    return {"emails": emails[:10], "phones": phones[:10], "socials": socials, "page_text": re.sub(r"\s+", " ", text)[:12000]}
-
-
-def enrich_lead(business: dict[str, Any]) -> dict[str, Any]:
-    """Enrich a lead with PUBLIC web contacts/profiles. No login, private data, or bypassing site controls."""
-    name = business["business_name"]
-    location = business.get("address", "")
-    website = business.get("website", "")
-    enrichment = {
-        "public_emails": [], "public_phones": [], "socials": {},
-        "linkedin": "", "facebook": "", "instagram": "", "tiktok": "", "youtube": "", "x": "",
-        "whatsapp": "", "contact_page": "", "search_sources": [], "web_summary": "",
-    }
-    urls = [website] if website else []
-    search_results = _search_web(f'"{name}" "{location}"', limit=8)
-    enrichment["search_sources"] = [x["url"] for x in search_results]
-    for item in search_results:
-        url, domain = item["url"], _domain(item["url"])
-        for social_domain, label in SOCIAL_DOMAINS.items():
-            if domain == social_domain or domain.endswith("." + social_domain):
-                enrichment.setdefault(label, "")
-                if not enrichment[label]:
-                    enrichment[label] = url
-        if not website and domain and not any(domain == d or domain.endswith("." + d) for d in SOCIAL_DOMAINS):
-            website = url
-            business["website"] = url
-            urls.append(url)
-    checked, page_texts = set(), []
-    for url in urls[:2]:
-        if not url.startswith("http") or url in checked:
-            continue
-        checked.add(url)
+def _overpass_query(query: str) -> dict[str,Any]:
+    last=""
+    for url in OVERPASS_URLS:
         try:
-            r = requests.get(url, headers=HTTP_HEADERS, timeout=15, allow_redirects=True)
-            if not r.ok:
-                continue
-            data = _extract_contacts_from_html(r.text, r.url)
-            enrichment["public_emails"].extend(data["emails"])
-            enrichment["public_phones"].extend(data["phones"])
-            enrichment["socials"].update(data["socials"])
-            page_texts.append(data["page_text"])
-            base = r.url.rstrip("/") + "/"
-            for path in ("contact", "contact-us", "about", "about-us"):
-                candidate = urljoin(base, path)
-                if candidate in checked:
-                    continue
-                try:
-                    cr = requests.get(candidate, headers=HTTP_HEADERS, timeout=10)
-                    if cr.ok and "text/html" in cr.headers.get("content-type", "text/html"):
-                        cdata = _extract_contacts_from_html(cr.text, cr.url)
-                        enrichment["public_emails"].extend(cdata["emails"])
-                        enrichment["public_phones"].extend(cdata["phones"])
-                        enrichment["socials"].update(cdata["socials"])
-                        enrichment["contact_page"] = enrichment["contact_page"] or cr.url
-                        page_texts.append(cdata["page_text"])
-                except requests.RequestException:
-                    pass
-        except requests.RequestException:
-            pass
-    enrichment["public_emails"] = sorted(set(enrichment["public_emails"]))[:10]
-    enrichment["public_phones"] = sorted(set(enrichment["public_phones"]))[:10]
-    for label, url in enrichment["socials"].items():
-        enrichment[label] = enrichment.get(label) or url
-    enrichment["web_summary"] = " ".join(page_texts)[:5000]
-    business.update(enrichment)
+            r=requests.post(url,data={"data":query},headers={**HTTP_HEADERS,"Content-Type":"application/x-www-form-urlencoded"},timeout=60)
+            if r.ok: return r.json()
+            last=f"{r.status_code} from {url}"
+        except requests.RequestException as e: last=str(e)
+    raise RuntimeError(f"All Overpass servers failed: {last}")
+
+
+def search_places(location: str,business_type: str,max_results:int=20)->list[dict[str,Any]]:
+    south,west,north,east=geocode_location(location); key=business_type.strip().lower(); tags=CATEGORY_TAGS.get(key)
+    if tags: clauses="\n".join(f' nwr["{a}"="{b}"]({south},{west},{north},{east});' for a,b in tags)
+    elif "restaurant" in key: clauses=f' nwr["amenity"="restaurant"]({south},{west},{north},{east});'
+    elif "shop" in key or "store" in key: clauses=f' nwr["shop"]({south},{west},{north},{east});'
+    else:
+        safe=re.sub(r"[^A-Za-z0-9 .&_-]","",business_type).strip(); clauses=f' nwr["name"~"{safe}",i]({south},{west},{north},{east});'
+    q=f"[out:json][timeout:25];({clauses});out center tags;"; elements=_overpass_query(q).get("elements",[]); out=[]; seen=set()
+    for e in elements:
+        t=e.get("tags",{}); name=t.get("name"); eid=str(e.get("id"))
+        if not name or eid in seen: continue
+        seen.add(eid); c=e.get("center",{}); lat=e.get("lat",c.get("lat")); lon=e.get("lon",c.get("lon"))
+        out.append({"id":eid,"business_name":name,"address":", ".join(filter(None,[t.get("addr:housenumber"),t.get("addr:street"),t.get("addr:city")])),"type":t.get("amenity") or t.get("shop") or t.get("office") or t.get("tourism") or t.get("leisure") or business_type,"website":t.get("website") or t.get("contact:website") or "","phone":t.get("phone") or t.get("contact:phone") or "","google_maps":f"https://www.google.com/maps/search/?api=1&query={lat},{lon}" if lat and lon else ""})
+        if len(out)>=max_results*4: break
+    return out
+
+
+def _search_web(query:str,limit:int=8)->list[dict[str,str]]:
+    try:
+        r=requests.get(DDG_URL,params={"q":query},headers=HTTP_HEADERS,timeout=20); r.raise_for_status(); soup=BeautifulSoup(r.text,"html.parser"); out=[]
+        for item in soup.select(".result")[:limit]:
+            a=item.select_one("a.result__a");
+            if not a: continue
+            href=a.get("href","")
+            if "uddg=" in href: href=unquote(parse_qs(urlparse(href).query).get("uddg",[href])[0])
+            if href.startswith("http"): out.append({"title":a.get_text(" ",strip=True),"url":href})
+        return out
+    except requests.RequestException: return []
+
+
+def _extract_page(html:str,base:str)->dict[str,Any]:
+    soup=BeautifulSoup(html,"html.parser"); text=soup.get_text(" ",strip=True)
+    emails=sorted(set(EMAIL_RE.findall(html+" "+text)))[:20]; phones=sorted(set(PHONE_RE.findall(text)))[:20]; socials={}
+    for a in soup.find_all("a",href=True):
+        u=urljoin(base,a["href"]); d=_domain(u)
+        for sd,label in SOCIAL_DOMAINS.items():
+            if d==sd or d.endswith("."+sd): socials.setdefault(label,u)
+    return {"text":text[:15000],"emails":emails,"phones":phones,"socials":socials,"links":[urljoin(base,a["href"]) for a in soup.find_all("a",href=True)]}
+
+
+def _crawl_site(root:str,max_pages:int=15)->dict[str,Any]:
+    if not root or not _safe_public_url(root): return {}
+    if not root.startswith("http"): root="https://"+root
+    q=deque([root]); visited=set(); emails=set(); phones=set(); socials={}; pages=[]; dm=[]; contact_page=""
+    while q and len(visited)<max_pages:
+        url=q.popleft().split("#")[0]
+        if url in visited or not _safe_public_url(url) or _domain(url)!=_domain(root): continue
+        visited.add(url)
+        try:
+            r=requests.get(url,headers=HTTP_HEADERS,timeout=15,allow_redirects=True)
+            if not r.ok or "text/html" not in r.headers.get("content-type",""): continue
+            data=_extract_page(r.text,r.url); emails.update(data["emails"]); phones.update(data["phones"]); socials.update(data["socials"]); pages.append({"title":BeautifulSoup(r.text,"html.parser").title.get_text(" ",strip=True) if BeautifulSoup(r.text,"html.parser").title else "","url":r.url})
+            low=data["text"].lower()
+            if any(w in low for w in ROLE_WORDS):
+                for role in ROLE_WORDS:
+                    idx=low.find(role)
+                    if idx>=0: dm.append(data["text"][max(0,idx-120):idx+260]); break
+            if not contact_page and any(w in (r.url.lower()+" "+low[:2000]) for w in CONTACT_WORDS): contact_page=r.url
+            for link in data["links"]:
+                if _domain(link)==_domain(root) and any(w in link.lower() for w in CONTACT_WORDS): q.append(link)
+        except requests.RequestException: continue
+    return {"public_emails":sorted(emails)[:20],"public_phones":sorted(phones)[:20],"socials":socials,"website_pages_scanned":len(pages),"website_pages":pages,"decision_maker_evidence":dm[:10],"contact_page":contact_page}
+
+
+def enrich_lead(business:dict[str,Any],location:str,crawl_pages:int=15)->dict[str,Any]:
+    name=business["business_name"]; search=_search_web(f'"{name}" "{location}" business',10); website=business.get("website","")
+    if not website:
+        website=next((x["url"] for x in search if _domain(x["url"]) and not any(_domain(x["url"]).endswith(d) for d in SOCIAL_DOMAINS)),"")
+    if website: business["website"]=website
+    site=_crawl_site(website,crawl_pages) if website else {}
+    # Search public professional/social profiles. We do not log in or bypass access controls.
+    dm_search=_search_web(f'"{name}" "{location}" owner founder director manager LinkedIn',8)
+    social_search=_search_web(f'"{name}" "{location}" LinkedIn Instagram Facebook TikTok',10)
+    profiles={}
+    for x in dm_search+social_search:
+        d=_domain(x["url"])
+        for sd,label in SOCIAL_DOMAINS.items():
+            if d==sd or d.endswith("."+sd): profiles.setdefault(label,x["url"])
+    profiles.update({k:v for k,v in site.get("socials",{}).items() if k not in profiles})
+    business.update(site); business["public_emails"]=sorted(set(site.get("public_emails",[])))
+    business["public_phones"]=sorted(set(site.get("public_phones",[])+([business.get("phone")] if business.get("phone") else [])))
+    for label in ("linkedin","instagram","facebook","tiktok","youtube","x","whatsapp"): business[label]=profiles.get(label,"")
+    business["search_sources"]=[x["url"] for x in search+dm_search+social_search][:30]
     return business
 
 
-def _deterministic_score(business: dict[str, Any], service: str) -> dict[str, Any]:
-    score, reasons = 45, ["Public business listing found", "Business category matches the search"]
-    if business.get("website"): score += 8; reasons.append("A public website is listed")
-    if business.get("public_emails"): score += 10; reasons.append("A public business email was found")
-    if business.get("linkedin") or business.get("instagram") or business.get("facebook"): score += 8; reasons.append("A public social/profile page was found")
-    if business.get("public_phones") or business.get("phone"): score += 5; reasons.append("A public business phone is available")
-    return {
-        "score": min(score, 100), "fit": "high" if score >= 75 else "medium" if score >= 60 else "low",
-        "reasons": reasons, "suggested_service": service,
-        "outreach": f"Hi! I came across {business['business_name']} and wanted to ask if you currently have someone handling your bookkeeping and monthly financial admin. I help small businesses with this work and would be happy to discuss it.",
-        "unknowns": ["Business size", "Current bookkeeping setup", "Whether bookkeeping support is currently needed"],
-    }
+def _deterministic_score(b:dict[str,Any],service:str)->dict[str,Any]:
+    score=35; reasons=["Public business listing found","Business category matches the search"]
+    if b.get("website"): score+=10; reasons.append("Public website found")
+    if b.get("public_emails"): score+=15; reasons.append("Public business email found")
+    if b.get("public_phones"): score+=7; reasons.append("Public business phone found")
+    if b.get("linkedin"): score+=8; reasons.append("Public LinkedIn presence found")
+    if b.get("decision_maker_evidence"): score+=10; reasons.append("Public owner/leadership evidence found")
+    return {"score":min(score,100),"fit":"high" if score>=75 else "medium" if score>=60 else "low","reasons":reasons,"suggested_service":service,"outreach":f"Hi! I came across {b['business_name']} and wanted to ask if you currently have someone handling your bookkeeping and monthly financial admin. I help small businesses with this work and would be happy to discuss it.","unknowns":["Business size","Current bookkeeping setup","Whether bookkeeping support is currently needed"]}
 
 
-def score_lead(business: dict[str, Any], service: str, ideal_customer: str, model: str = "qwen3:4b") -> dict[str, Any]:
-    prompt = f"""
-You are a careful B2B lead qualification assistant.
-Service being sold: {service}
-Ideal customer: {ideal_customer}
-PUBLIC BUSINESS DATA:
-{json.dumps(business, ensure_ascii=False, indent=2)}
-Score how promising this business is from 0 to 100. Use ONLY supplied facts. Never invent revenue, employees, owners, pain points, or contacts. Unknown information must stay unknown.
-Return ONLY JSON with score (integer 0-100), fit (high/medium/low), reasons (2-5 short factual reasons), suggested_service, outreach (under 600 chars), unknowns.
-"""
-    response = requests.post(OLLAMA_URL, json={"model": model, "prompt": prompt, "stream": False, "format": "json"}, timeout=120)
-    response.raise_for_status()
-    result = json.loads(response.json().get("response", "").strip())
-    result["score"] = max(0, min(100, int(result.get("score", 0))))
-    result["fit"] = result.get("fit", "low")
-    result["reasons"] = result.get("reasons", [])
-    result["suggested_service"] = result.get("suggested_service", service)
-    result["outreach"] = result.get("outreach", "")
-    result["unknowns"] = result.get("unknowns", [])
-    return result
+def score_lead(b:dict[str,Any],service:str,ideal_customer:str,model:str="qwen3:4b")->dict[str,Any]:
+    prompt=f"""You are a careful B2B lead qualification assistant. Service: {service}. Ideal customer: {ideal_customer}. PUBLIC DATA ONLY:\n{json.dumps(b,ensure_ascii=False,indent=2)}\nScore 0-100. Prioritize reachable businesses and evidence of a decision maker. Never invent names, revenue, employees, pain points or contacts. Return ONLY JSON: score, fit, reasons (2-5 factual reasons), suggested_service, outreach (under 600 chars), unknowns."""
+    r=requests.post(OLLAMA_URL,json={"model":model,"prompt":prompt,"stream":False,"format":"json"},timeout=120); r.raise_for_status(); x=json.loads(r.json().get("response","").strip()); x["score"]=max(0,min(100,int(x.get("score",0)))); x["fit"]=x.get("fit","low"); x["reasons"]=x.get("reasons",[]); x["suggested_service"]=x.get("suggested_service",service); x["outreach"]=x.get("outreach",""); x["unknowns"]=x.get("unknowns",[]); return x
 
 
-def qualify_leads(places: list[dict[str, Any]], service: str, ideal_customer: str, model: str = "qwen3:4b", enrich: bool = True) -> list[dict[str, Any]]:
-    results = []
-    for business in places:
-        if enrich:
-            business = enrich_lead(business)
-        try:
-            score = score_lead(business, service, ideal_customer, model)
-            ai_mode = "Local AI"
-        except Exception:
-            score = _deterministic_score(business, service)
-            ai_mode = "Rule-based fallback"
-        results.append({**business, **score, "ai_mode": ai_mode})
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+def qualify_leads(places:list[dict[str,Any]],service:str,ideal_customer:str,model:str="qwen3:4b",enrich:bool=True,location:str="",require_contact:bool=True,require_website:bool=False,crawl_pages:int=15)->list[dict[str,Any]]:
+    results=[]
+    for raw in places:
+        b=enrich_lead(raw,location,crawl_pages) if enrich else raw
+        has_contact=bool(b.get("public_emails") or b.get("public_phones") or b.get("linkedin") or b.get("instagram") or b.get("facebook") or b.get("whatsapp"))
+        if require_website and not b.get("website"): continue
+        if require_contact and not has_contact: continue
+        try: score=score_lead(b,service,ideal_customer,model); mode="Local AI"
+        except Exception: score=_deterministic_score(b,service); mode="Rule-based fallback"
+        results.append({**b,**score,"ai_mode":mode})
+    return sorted(results,key=lambda x:x["score"],reverse=True)
